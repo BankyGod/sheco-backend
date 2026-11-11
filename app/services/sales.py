@@ -16,6 +16,12 @@ from app.services.inventory import (
 from app.services.settings_svc import get_or_create_settings
 
 
+def _salesperson_name(sale: Sale) -> str:
+    if getattr(sale, "salesperson", None) is not None:
+        return sale.salesperson.name
+    return sale.salesperson_id
+
+
 def _serialize_sale(sale: Sale, *, for_salesperson: bool = False) -> dict:
     items = []
     for item in sale.items:
@@ -35,6 +41,7 @@ def _serialize_sale(sale: Sale, *, for_salesperson: bool = False) -> dict:
         "receiptNumber": sale.receipt_number,
         "deviceId": sale.device_id,
         "salespersonId": sale.salesperson_id,
+        "salespersonName": _salesperson_name(sale),
         "createdAt": sale.created_at.isoformat(),
         "total": sale.total,
         "status": sale.status,
@@ -49,11 +56,16 @@ def _serialize_sale(sale: Sale, *, for_salesperson: bool = False) -> dict:
         "items": items,
         "syncFlag": sale.sync_flag,
         "needsReview": sale.needs_review,
+        "reviewReason": getattr(sale, "review_reason", None),
     }
 
 
 def list_sales(db: Session, actor) -> list[dict]:
-    q = db.query(Sale).options(joinedload(Sale.items)).order_by(Sale.created_at.desc())
+    q = (
+        db.query(Sale)
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
+        .order_by(Sale.created_at.desc())
+    )
     if actor.role == "salesperson":
         q = q.filter(Sale.salesperson_id == actor.id)
     sales = q.all()
@@ -64,7 +76,7 @@ def list_sales(db: Session, actor) -> list[dict]:
 def get_sale(db: Session, sale_id: str, actor) -> dict | None:
     sale = (
         db.query(Sale)
-        .options(joinedload(Sale.items))
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
         .filter(Sale.id == sale_id)
         .first()
     )
@@ -82,6 +94,23 @@ def _next_receipt_number(db: Session, device_id: str) -> str:
     return f"{device_id}-{day}-{settings.receipt_seq:04d}"
 
 
+def _resolve_salesperson(db: Session, payload: dict, actor) -> User:
+    requested_id = payload.get("salesperson_id")
+    if not requested_id or requested_id == actor.id:
+        return actor.user or db.get(User, actor.id)
+
+    if actor.role != "super_admin" and requested_id != actor.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can sync sales for another salesperson",
+        )
+
+    seller = db.get(User, requested_id)
+    if not seller:
+        raise HTTPException(status_code=400, detail="Original salesperson not found")
+    return seller
+
+
 def complete_sale(
     db: Session,
     payload: dict,
@@ -90,7 +119,12 @@ def complete_sale(
     from_sync: bool = False,
 ) -> dict:
     sale_id = payload.get("id") or new_id("sale")
-    existing = db.get(Sale, sale_id)
+    existing = (
+        db.query(Sale)
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
+        .filter(Sale.id == sale_id)
+        .first()
+    )
     if existing:
         return _serialize_sale(existing, for_salesperson=actor.role == "salesperson")
 
@@ -98,6 +132,7 @@ def complete_sale(
     allow_overshoot = from_sync
     line_items: list[dict] = []
     total = 0
+    review_reasons: list[str] = []
 
     for line in payload["items"]:
         product = db.get(Product, line["product_id"])
@@ -108,6 +143,17 @@ def complete_sale(
                 status_code=400,
                 detail=f"{product.name} requires a prescription reference",
             )
+
+        queued_price = line.get("unit_selling_price")
+        if (
+            from_sync
+            and queued_price is not None
+            and int(queued_price) != int(product.selling_price)
+        ):
+            review_reasons.append(
+                f"Price changed for {product.name}: queued {int(queued_price)} vs server {product.selling_price}"
+            )
+
         allocations = allocate_batches_for_sale(
             db,
             line["product_id"],
@@ -115,6 +161,7 @@ def complete_sale(
             allow_overshoot=allow_overshoot,
         )
         for alloc in allocations:
+            # Conflict policy: always charge current server selling price.
             line_items.append(
                 {
                     "product_id": line["product_id"],
@@ -127,11 +174,17 @@ def complete_sale(
             )
             total += product.selling_price * alloc["quantity"]
 
+    salesperson = _resolve_salesperson(db, payload, actor)
     needs_review = deduct_allocations(
         db,
         [{"batchId": i["batch_id"], "quantity": i["quantity"]} for i in line_items],
-        user_id=actor.id,
+        user_id=salesperson.id,
     )
+    if needs_review:
+        review_reasons.append("Stock overshoot during offline sync")
+    if from_sync and offline and not review_reasons:
+        # Mark offline origin lightly only when nothing else flagged.
+        pass
 
     payment = payload["payment"]
     device_id = payload.get("device_id") or actor.device_id
@@ -140,19 +193,29 @@ def complete_sale(
         created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
 
     receipt_number = payload.get("receipt_number") or _next_receipt_number(db, device_id)
+    if payload.get("receipt_number"):
+        clash = (
+            db.query(Sale)
+            .filter(Sale.receipt_number == receipt_number, Sale.id != sale_id)
+            .first()
+        )
+        if clash:
+            receipt_number = _next_receipt_number(db, device_id)
+            review_reasons.append("Receipt number regenerated due to conflict")
 
     sale = Sale(
         id=sale_id,
         receipt_number=receipt_number,
         device_id=device_id,
-        salesperson_id=actor.id,
+        salesperson_id=salesperson.id,
         created_at=created_at,
         total=total,
         discount=0,
         status="completed",
         void_reason=None,
-        sync_flag="synced",
-        needs_review=needs_review or (offline and needs_review),
+        sync_flag="synced" if not from_sync else "synced_offline",
+        needs_review=bool(review_reasons) or needs_review,
+        review_reason="; ".join(review_reasons) if review_reasons else None,
         payment_method=payment["method"],
         amount_tendered=payment["amount_tendered"],
         change_amount=payment.get("change") or 0,
@@ -173,15 +236,18 @@ def complete_sale(
             )
         )
 
-    if needs_review:
-        sale.needs_review = True
+    sale.salesperson = salesperson
 
     add_audit(
         db,
         user_id=actor.id,
         device_id=device_id,
         action="sale",
-        record=f"Receipt {sale.receipt_number}" + (" (synced)" if from_sync else ""),
+        record=(
+            f"Receipt {sale.receipt_number}"
+            + (" (synced offline)" if from_sync else "")
+            + (f" — review: {sale.review_reason}" if sale.needs_review else "")
+        ),
     )
     db.flush()
     return _serialize_sale(sale, for_salesperson=actor.role == "salesperson")
@@ -190,7 +256,7 @@ def complete_sale(
 def void_sale(db: Session, sale_id: str, reason: str, actor) -> dict:
     sale = (
         db.query(Sale)
-        .options(joinedload(Sale.items))
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
         .filter(Sale.id == sale_id)
         .first()
     )
@@ -217,14 +283,82 @@ def void_sale(db: Session, sale_id: str, reason: str, actor) -> dict:
 
 
 def sync_sales(db: Session, sales_payload: list[dict], actor) -> dict:
+    """Sync sales one-by-one. Commit successes; keep failures in the client queue."""
     synced = 0
+    already = 0
+    failed = 0
     results = []
     for payload in sales_payload:
-        # Force sync path: accept even if stock is short and flag for review
-        result = complete_sale(db, {**payload, "offline": True}, actor, from_sync=True)
-        results.append(result)
-        synced += 1
-    return {"synced": synced, "sales": results}
+        sale_id = payload.get("id") or ""
+        try:
+            existing = db.get(Sale, sale_id) if sale_id else None
+            if existing:
+                already += 1
+                results.append(
+                    {
+                        "id": existing.id,
+                        "status": "already_exists",
+                        "sale": _serialize_sale(
+                            existing, for_salesperson=actor.role == "salesperson"
+                        ),
+                    }
+                )
+                continue
+
+            sale = complete_sale(db, {**payload, "offline": True}, actor, from_sync=True)
+            db.commit()
+            synced += 1
+            results.append({"id": sale["id"], "status": "synced", "sale": sale})
+        except HTTPException as exc:
+            db.rollback()
+            failed += 1
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            results.append({"id": sale_id, "status": "failed", "error": detail})
+        except Exception as exc:  # noqa: BLE001 — surface per-sale errors to client
+            db.rollback()
+            failed += 1
+            results.append({"id": sale_id, "status": "failed", "error": str(exc)})
+    return {
+        "synced": synced,
+        "alreadyExists": already,
+        "failed": failed,
+        "results": results,
+    }
+
+
+def list_sales_needing_review(db: Session) -> list[dict]:
+    sales = (
+        db.query(Sale)
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
+        .filter(Sale.needs_review.is_(True), Sale.status == "completed")
+        .order_by(Sale.created_at.desc())
+        .all()
+    )
+    return [_serialize_sale(s, for_salesperson=False) for s in sales]
+
+
+def clear_sale_review(db: Session, sale_id: str, actor, *, note: str | None = None) -> dict:
+    sale = (
+        db.query(Sale)
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
+        .filter(Sale.id == sale_id)
+        .first()
+    )
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found")
+    sale.needs_review = False
+    cleared = note.strip() if note else "Reviewed and cleared"
+    prior = sale.review_reason or ""
+    sale.review_reason = f"{prior} | Cleared: {cleared}".strip(" |")
+    add_audit(
+        db,
+        user_id=actor.id,
+        device_id=actor.device_id,
+        action="sale_review",
+        record=f"Cleared review for {sale.receipt_number}: {cleared}",
+    )
+    db.flush()
+    return _serialize_sale(sale, for_salesperson=False)
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -303,7 +437,7 @@ def get_dashboard_stats(db: Session) -> dict:
 def get_report_data(db: Session, *, from_date: str | None, to_date: str | None) -> dict:
     sales = (
         db.query(Sale)
-        .options(joinedload(Sale.items))
+        .options(joinedload(Sale.items), joinedload(Sale.salesperson))
         .filter(Sale.status == "completed")
         .all()
     )
@@ -318,6 +452,7 @@ def get_report_data(db: Session, *, from_date: str | None, to_date: str | None) 
         if key not in by_salesperson:
             by_salesperson[key] = {
                 "salespersonId": key,
+                "salespersonName": _salesperson_name(sale),
                 "count": 0,
                 "revenue": 0,
                 "profit": 0,
@@ -339,6 +474,7 @@ def get_report_data(db: Session, *, from_date: str | None, to_date: str | None) 
             "amount": s.total,
             "createdAt": s.created_at.isoformat(),
             "salespersonId": s.salesperson_id,
+            "salespersonName": _salesperson_name(s),
         }
         for s in sales
         if s.payment_method == "momo"

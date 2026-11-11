@@ -28,6 +28,7 @@ class User(Base):
     pin_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -85,6 +86,7 @@ class Sale(Base):
     void_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     sync_flag: Mapped[str] = mapped_column(String(20), nullable=False, default="synced")
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    review_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     payment_method: Mapped[str] = mapped_column(String(20), nullable=False)
     amount_tendered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     change_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -148,3 +150,13 @@ class SettingsRow(Base):
     offline_unlock_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
     expiry_alert_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
     receipt_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pharmacy_name: Mapped[str] = mapped_column(String(200), nullable=False, default="Sheco Pharmacy")
+    pharmacy_phone: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    pharmacy_address: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    pharmacy_email: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    receipt_footer: Mapped[str] = mapped_column(
+        String(300), nullable=False, default="Thank you for shopping with Sheco"
+    )
+    momo_account_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    momo_account_number: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+

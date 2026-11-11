@@ -12,7 +12,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 12
     algorithm: str = "HS256"
     database_url: str = "sqlite:///./sheco.db"
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,https://sheco.online,http://sheco.online"
+    )
     seed_on_startup: bool = True
 
     @property

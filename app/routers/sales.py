@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import Actor, get_current_actor, require_admin
-from app.schemas.common import CompleteSaleIn, SyncSalesIn, VoidSaleIn
+from app.schemas.common import ClearReviewIn, CompleteSaleIn, SyncSalesIn, VoidSaleIn
 from app.services import sales as sales_svc
 
 router = APIRouter(prefix="/sales", tags=["sales"])
@@ -17,6 +17,7 @@ def _sale_payload(body: CompleteSaleIn) -> dict:
                 "product_id": line.product_id,
                 "quantity": line.quantity,
                 "prescription_ref": line.prescription_ref,
+                "unit_selling_price": line.unit_selling_price,
             }
             for line in body.items
         ],
@@ -31,6 +32,7 @@ def _sale_payload(body: CompleteSaleIn) -> dict:
         "receipt_number": body.receipt_number,
         "device_id": body.device_id,
         "created_at": body.created_at,
+        "salesperson_id": body.salesperson_id,
     }
 
 
@@ -48,9 +50,16 @@ def sync_sales(
     db: Session = Depends(get_db),
     actor: Actor = Depends(get_current_actor),
 ):
-    result = sales_svc.sync_sales(db, [_sale_payload(s) for s in body.sales], actor)
-    db.commit()
-    return result
+    # Commits happen per successful sale inside the service.
+    return sales_svc.sync_sales(db, [_sale_payload(s) for s in body.sales], actor)
+
+
+@router.get("/needs-review")
+def list_needs_review(
+    db: Session = Depends(get_db),
+    _: Actor = Depends(require_admin),
+):
+    return sales_svc.list_sales_needing_review(db)
 
 
 @router.post("")
@@ -84,5 +93,17 @@ def void_sale(
     actor: Actor = Depends(require_admin),
 ):
     result = sales_svc.void_sale(db, sale_id, body.reason, actor)
+    db.commit()
+    return result
+
+
+@router.post("/{sale_id}/clear-review")
+def clear_review(
+    sale_id: str,
+    body: ClearReviewIn,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(require_admin),
+):
+    result = sales_svc.clear_sale_review(db, sale_id, actor, note=body.note)
     db.commit()
     return result

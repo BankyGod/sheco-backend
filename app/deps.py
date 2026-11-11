@@ -33,7 +33,7 @@ def get_current_actor(
 
     user_id = payload.get("sub")
     user = db.get(User, user_id) if user_id else None
-    if not user or not user.active:
+    if not user or not user.active or getattr(user, "deleted", False):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive or missing")
 
     return Actor(

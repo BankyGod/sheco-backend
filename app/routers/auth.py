@@ -7,8 +7,11 @@ from app.database import get_db
 from app.deps import Actor, get_current_actor, require_admin
 from app.models import User
 from app.schemas.common import (
+    ChangePasswordIn,
+    ChangePinIn,
     LoginIn,
     PasswordResetIn,
+    ProfileUpdateIn,
     UserActiveIn,
     UserCreateIn,
 )
@@ -28,6 +31,7 @@ def _public_user(user: User) -> dict:
         "username": user.username,
         "role": user.role,
         "active": user.active,
+        "deleted": bool(getattr(user, "deleted", False)),
     }
 
 
@@ -51,7 +55,12 @@ def login(
             detail="Account temporarily locked due to failed sign-in attempts",
         )
 
-    if not user or not user.active or not verify_password(body.password, user.password_hash):
+    if (
+        not user
+        or not user.active
+        or getattr(user, "deleted", False)
+        or not verify_password(body.password, user.password_hash)
+    ):
         if user:
             user.failed_login_attempts += 1
             if user.failed_login_attempts >= 5:
@@ -90,6 +99,98 @@ def login(
 @router.get("/me")
 def me(actor: Actor = Depends(get_current_actor)):
     return _public_user(actor.user)
+
+
+@router.patch("/me")
+def update_me(
+    body: ProfileUpdateIn,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(get_current_actor),
+):
+    user = db.get(User, actor.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Name cannot be empty")
+        user.name = name
+
+    if body.username is not None:
+        username = body.username.strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="Username cannot be empty")
+        exists = (
+            db.query(User)
+            .filter(User.username.ilike(username), User.id != user.id)
+            .first()
+        )
+        if exists:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        user.username = username
+
+    add_audit(
+        db,
+        user_id=actor.id,
+        device_id=actor.device_id,
+        action="profile_update",
+        record=f"Updated profile for {user.username}",
+    )
+    db.commit()
+    db.refresh(user)
+    return _public_user(user)
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordIn,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(get_current_actor),
+):
+    user = db.get(User, actor.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(body.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    user.password_hash = hash_password(body.new_password)
+    add_audit(
+        db,
+        user_id=actor.id,
+        device_id=actor.device_id,
+        action="password_change",
+        record=f"Password changed for {user.username}",
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/change-pin")
+def change_pin(
+    body: ChangePinIn,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(get_current_actor),
+):
+    user = db.get(User, actor.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(body.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    pin = body.new_pin.strip()
+    if len(pin) < 4:
+        raise HTTPException(status_code=400, detail="PIN must be at least 4 characters")
+    user.pin_hash = hash_password(pin)
+    add_audit(
+        db,
+        user_id=actor.id,
+        device_id=actor.device_id,
+        action="pin_change",
+        record=f"PIN changed for {user.username}",
+    )
+    db.commit()
+    return {"ok": True}
 
 
 @users_router.get("")
@@ -146,6 +247,13 @@ def set_user_active(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(user, "deleted", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Deleted accounts cannot be reactivated. Create a new user instead.",
+        )
+    if user.id == actor.id and not body.active:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
     user.active = body.active
     add_audit(
         db,
@@ -158,6 +266,55 @@ def set_user_active(
     return _public_user(user)
 
 
+@users_router.delete("/{user_id}")
+def delete_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(require_admin),
+):
+    """Soft-delete a salesperson. Sales history stays linked for accounting."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == actor.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    if getattr(user, "deleted", False):
+        raise HTTPException(status_code=400, detail="User is already deleted")
+    if user.role != "salesperson":
+        raise HTTPException(
+            status_code=400,
+            detail="Only salesperson accounts can be deleted. Deactivate admin accounts instead.",
+        )
+
+    original_username = user.username
+    # Keep the row + name so sales reports still show who sold.
+    # Free the username for reuse and block any future login.
+    freed = f"deleted.{user.id}.{original_username}"
+    user.username = freed[:80]
+    user.active = False
+    user.deleted = True
+    user.password_hash = hash_password(new_id("del"))
+    user.pin_hash = hash_password(new_id("pin"))
+    user.failed_login_attempts = 0
+    user.locked_until = None
+
+    add_audit(
+        db,
+        user_id=actor.id,
+        device_id=actor.device_id,
+        action="user_delete",
+        record=(
+            f"Deleted salesperson {user.name} (@{original_username}); "
+            "sales history retained for accounting"
+        ),
+    )
+    db.commit()
+    return {
+        **_public_user(user),
+        "message": "Account deleted. Sales made by this person remain in records.",
+    }
+
+
 @users_router.post("/{user_id}/reset-password")
 def reset_password(
     user_id: str,
@@ -168,6 +325,8 @@ def reset_password(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if getattr(user, "deleted", False):
+        raise HTTPException(status_code=400, detail="Cannot reset password for a deleted account")
     user.password_hash = hash_password(body.password)
     add_audit(
         db,

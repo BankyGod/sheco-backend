@@ -19,6 +19,7 @@ class PublicUser(CamelModel):
     username: str
     role: Role
     active: bool
+    deleted: bool = False
 
 
 class SessionOut(CamelModel):
@@ -50,6 +51,21 @@ class UserActiveIn(CamelModel):
 
 class PasswordResetIn(CamelModel):
     password: str
+
+
+class ProfileUpdateIn(CamelModel):
+    name: str | None = None
+    username: str | None = None
+
+
+class ChangePasswordIn(CamelModel):
+    current_password: str = Field(alias="currentPassword")
+    new_password: str = Field(alias="newPassword")
+
+
+class ChangePinIn(CamelModel):
+    current_password: str = Field(alias="currentPassword")
+    new_pin: str = Field(alias="newPin")
 
 
 class BatchOut(CamelModel):
@@ -126,6 +142,7 @@ class SaleLineIn(CamelModel):
     product_id: str = Field(alias="productId")
     quantity: int
     prescription_ref: str | None = Field(default=None, alias="prescriptionRef")
+    unit_selling_price: int | None = Field(default=None, alias="unitSellingPrice")
 
 
 class CompleteSaleIn(CamelModel):
@@ -136,6 +153,7 @@ class CompleteSaleIn(CamelModel):
     receipt_number: str | None = Field(default=None, alias="receiptNumber")
     device_id: str | None = Field(default=None, alias="deviceId")
     created_at: datetime | None = Field(default=None, alias="createdAt")
+    salesperson_id: str | None = Field(default=None, alias="salespersonId")
 
 
 class SyncSalesIn(CamelModel):
@@ -144,6 +162,10 @@ class SyncSalesIn(CamelModel):
 
 class VoidSaleIn(CamelModel):
     reason: str
+
+
+class ClearReviewIn(CamelModel):
+    note: str | None = None
 
 
 class SaleItemOut(CamelModel):
@@ -168,6 +190,7 @@ class SaleOut(CamelModel):
     receipt_number: str = Field(alias="receiptNumber")
     device_id: str = Field(alias="deviceId")
     salesperson_id: str = Field(alias="salespersonId")
+    salesperson_name: str | None = Field(default=None, alias="salespersonName")
     created_at: datetime = Field(alias="createdAt")
     total: int
     status: SaleStatus
@@ -176,6 +199,7 @@ class SaleOut(CamelModel):
     items: list[SaleItemOut]
     sync_flag: str | None = Field(default=None, alias="syncFlag")
     needs_review: bool | None = Field(default=None, alias="needsReview")
+    review_reason: str | None = Field(default=None, alias="reviewReason")
 
 
 class SettingsOut(CamelModel):
@@ -183,6 +207,13 @@ class SettingsOut(CamelModel):
     session_timeout_minutes: int = Field(alias="sessionTimeoutMinutes")
     offline_unlock_days: int = Field(alias="offlineUnlockDays")
     expiry_alert_days: int = Field(alias="expiryAlertDays")
+    pharmacy_name: str = Field(alias="pharmacyName")
+    pharmacy_phone: str = Field(alias="pharmacyPhone")
+    pharmacy_address: str = Field(alias="pharmacyAddress")
+    pharmacy_email: str = Field(alias="pharmacyEmail")
+    receipt_footer: str = Field(alias="receiptFooter")
+    momo_account_name: str = Field(alias="momoAccountName")
+    momo_account_number: str = Field(alias="momoAccountNumber")
 
 
 class SettingsUpdateIn(CamelModel):
@@ -190,6 +221,13 @@ class SettingsUpdateIn(CamelModel):
     session_timeout_minutes: int | None = Field(default=None, alias="sessionTimeoutMinutes")
     offline_unlock_days: int | None = Field(default=None, alias="offlineUnlockDays")
     expiry_alert_days: int | None = Field(default=None, alias="expiryAlertDays")
+    pharmacy_name: str | None = Field(default=None, alias="pharmacyName")
+    pharmacy_phone: str | None = Field(default=None, alias="pharmacyPhone")
+    pharmacy_address: str | None = Field(default=None, alias="pharmacyAddress")
+    pharmacy_email: str | None = Field(default=None, alias="pharmacyEmail")
+    receipt_footer: str | None = Field(default=None, alias="receiptFooter")
+    momo_account_name: str | None = Field(default=None, alias="momoAccountName")
+    momo_account_number: str | None = Field(default=None, alias="momoAccountNumber")
 
 
 class AuditOut(CamelModel):
