@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sheco
+      POSTGRES_PASSWORD: sheco
+      POSTGRES_DB: sheco
+    ports:
+      - "5432:5432"
+    volumes:
+      - sheco_pg:/var/lib/postgresql/data
+
+volumes:
+  sheco_pg:
