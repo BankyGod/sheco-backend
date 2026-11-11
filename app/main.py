@@ -8,6 +8,7 @@ from app.database import Base, SessionLocal, engine
 from app.routers import auth, inventory, products, reports, sales
 from app.schema_migrate import ensure_schema
 from app.seed import seed_if_empty
+from app.services.purge import purge_operational_data
 
 
 @asynccontextmanager
@@ -15,12 +16,15 @@ async def lifespan(_app: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_schema()
     settings = get_settings()
-    if settings.seed_on_startup:
-        db = SessionLocal()
-        try:
+    db = SessionLocal()
+    try:
+        if settings.seed_on_startup:
             seed_if_empty(db)
-        finally:
-            db.close()
+        if settings.purge_demo_data_on_startup:
+            purge_operational_data(db)
+            db.commit()
+    finally:
+        db.close()
     yield
 
 

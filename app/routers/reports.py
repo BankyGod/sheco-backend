@@ -98,3 +98,16 @@ def update_settings(
     db.commit()
     db.refresh(row)
     return _serialize_settings(row)
+
+
+@router.post("/admin/purge-data")
+def purge_data(
+    db: Session = Depends(get_db),
+    actor: Actor = Depends(require_admin),
+):
+    """Clear inventory, sales, audits, and non-admin users. Keeps one admin + settings."""
+    from app.services.purge import purge_operational_data
+
+    result = purge_operational_data(db, actor=actor)
+    db.commit()
+    return {"ok": True, **result}

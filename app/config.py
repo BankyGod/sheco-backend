@@ -16,6 +16,8 @@ class Settings(BaseSettings):
         "http://localhost:5173,http://127.0.0.1:5173,https://sheco.online,http://sheco.online"
     )
     seed_on_startup: bool = True
+    # When true on startup: wipe inventory/sales and keep only one admin account.
+    purge_demo_data_on_startup: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:
