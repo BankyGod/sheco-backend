@@ -30,10 +30,11 @@ def _serialize_settings(row) -> dict:
 
 @router.get("/dashboard/stats")
 def dashboard_stats(
+    period: str = Query(default="this-week"),
     db: Session = Depends(get_db),
     _: Actor = Depends(require_admin),
 ):
-    return sales_svc.get_dashboard_stats(db)
+    return sales_svc.get_dashboard_stats(db, period=period)
 
 
 @router.get("/reports/sales")

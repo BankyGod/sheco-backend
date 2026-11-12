@@ -367,70 +367,200 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def get_dashboard_stats(db: Session) -> dict:
+PERIOD_OPTIONS = {
+    "today": "Today",
+    "this-week": "This week",
+    "last-week": "Last week",
+    "this-month": "This month",
+    "last-month": "Last month",
+    "this-year": "This year",
+    "all-time": "All time",
+}
+
+
+def _period_bounds(period: str, now: datetime) -> tuple[datetime | None, datetime]:
+    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now
+
+    if period == "today":
+        return start_of_today, end
+
+    if period == "this-week":
+        # Monday-start week
+        start = start_of_today - timedelta(days=start_of_today.weekday())
+        return start, end
+
+    if period == "last-week":
+        this_week_start = start_of_today - timedelta(days=start_of_today.weekday())
+        start = this_week_start - timedelta(days=7)
+        return start, this_week_start
+
+    if period == "this-month":
+        return start_of_today.replace(day=1), end
+
+    if period == "last-month":
+        first_this_month = start_of_today.replace(day=1)
+        last_month_end = first_this_month
+        if first_this_month.month == 1:
+            start = first_this_month.replace(year=first_this_month.year - 1, month=12)
+        else:
+            start = first_this_month.replace(month=first_this_month.month - 1)
+        return start, last_month_end
+
+    if period == "this-year":
+        return start_of_today.replace(month=1, day=1), end
+
+    if period == "all-time":
+        return None, end
+
+    # default this-week
+    start = start_of_today - timedelta(days=start_of_today.weekday())
+    return start, end
+
+
+def _bucket_sales(sales: list[Sale], *, start: datetime, end: datetime, mode: str) -> list[dict]:
+    week_days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    rows: list[dict] = []
+
+    def profit_for(day_sales: list[Sale]) -> tuple[int, int]:
+        revenue = sum(s.total for s in day_sales)
+        cost = sum(
+            item.unit_cost_price * item.quantity for s in day_sales for item in s.items
+        )
+        return revenue, revenue - cost
+
+    if mode == "hour":
+        for hour in range(24):
+            bucket_start = start.replace(hour=hour, minute=0, second=0, microsecond=0)
+            bucket_end = bucket_start + timedelta(hours=1)
+            day_sales = [s for s in sales if bucket_start <= _as_utc(s.created_at) < bucket_end]
+            revenue, profit = profit_for(day_sales)
+            label = bucket_start.strftime("%I%p").lstrip("0").lower()
+            rows.append(
+                {
+                    "label": label,
+                    "day": label,
+                    "month": label,
+                    "sales": len(day_sales),
+                    "revenue": revenue / 100,
+                    "profit": profit / 100,
+                }
+            )
+        return rows
+
+    if mode == "day":
+        cursor = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_day = end.replace(hour=0, minute=0, second=0, microsecond=0)
+        while cursor <= end_day:
+            next_day = cursor + timedelta(days=1)
+            day_sales = [s for s in sales if cursor <= _as_utc(s.created_at) < next_day]
+            revenue, profit = profit_for(day_sales)
+            js_day = (cursor.weekday() + 1) % 7
+            label = week_days[js_day] if (end_day - start).days <= 7 else cursor.strftime("%d %b")
+            rows.append(
+                {
+                    "label": label,
+                    "day": label,
+                    "month": label,
+                    "sales": len(day_sales),
+                    "revenue": revenue / 100,
+                    "profit": profit / 100,
+                }
+            )
+            cursor = next_day
+        return rows
+
+    # month buckets
+    cursor = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_month = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while cursor <= end_month:
+        if cursor.month == 12:
+            next_month = cursor.replace(year=cursor.year + 1, month=1)
+        else:
+            next_month = cursor.replace(month=cursor.month + 1)
+        month_sales = [s for s in sales if cursor <= _as_utc(s.created_at) < next_month]
+        revenue, profit = profit_for(month_sales)
+        label = cursor.strftime("%b")
+        rows.append(
+            {
+                "label": label,
+                "day": label,
+                "month": label,
+                "sales": len(month_sales),
+                "revenue": revenue / 100,
+                "profit": profit / 100,
+            }
+        )
+        cursor = next_month
+    return rows
+
+
+def get_dashboard_stats(db: Session, period: str = "this-week") -> dict:
+    if period not in PERIOD_OPTIONS:
+        period = "this-week"
+
     sales = db.query(Sale).options(joinedload(Sale.items)).all()
     completed = [s for s in sales if s.status == "completed"]
     voided = [s for s in sales if s.status == "voided"]
 
-    start_of_today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    today_sales = [s for s in completed if _as_utc(s.created_at) >= start_of_today]
-
-    today_revenue = sum(s.total for s in today_sales)
-    cash_revenue = sum(s.total for s in today_sales if s.payment_method == "cash")
-    momo_revenue = sum(s.total for s in today_sales if s.payment_method == "momo")
-
-    week_days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    chronological = []
-    for i in range(6, -1, -1):
-        day = start_of_today - timedelta(days=i)
-        next_day = day + timedelta(days=1)
-        day_sales = [s for s in completed if day <= _as_utc(s.created_at) < next_day]
-        # Python weekday: Mon=0 ... Sun=6; JS getDay(): Sun=0
-        js_day = (day.weekday() + 1) % 7
-        chronological.append(
-            {
-                "day": week_days[js_day],
-                "sales": len(day_sales),
-                "revenue": sum(s.total for s in day_sales) / 100,
-            }
-        )
-
-    monthly = []
     now = datetime.now(timezone.utc)
-    for i in range(6):
-        month_offset = 5 - i
-        year = now.year
-        month = now.month - month_offset
-        while month <= 0:
-            month += 12
-            year -= 1
-        label = datetime(year, month, 1).strftime("%b")
-        month_sales = [
-            s
-            for s in completed
-            if _as_utc(s.created_at).year == year and _as_utc(s.created_at).month == month
-        ]
-        revenue = sum(s.total for s in month_sales)
-        cost = sum(
-            item.unit_cost_price * item.quantity for s in month_sales for item in s.items
-        )
-        monthly.append(
-            {
-                "month": label,
-                "revenue": revenue / 100,
-                "profit": (revenue - cost) / 100,
-            }
-        )
+    start, end = _period_bounds(period, now)
+    period_sales = [
+        s
+        for s in completed
+        if (start is None or _as_utc(s.created_at) >= start) and _as_utc(s.created_at) < end
+    ]
+
+    period_revenue = sum(s.total for s in period_sales)
+    cash_revenue = sum(s.total for s in period_sales if s.payment_method == "cash")
+    momo_revenue = sum(s.total for s in period_sales if s.payment_method == "momo")
+
+    if period == "today":
+        series_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        series = _bucket_sales(period_sales, start=series_start, end=end, mode="hour")
+        trend = series
+        volume_label = "Hourly sales volume"
+    elif period in {"this-week", "last-week"}:
+        assert start is not None
+        series_end = end - timedelta(microseconds=1) if period == "last-week" else end
+        series = _bucket_sales(completed, start=start, end=series_end, mode="day")
+        # last 6 months trend for revenue chart context
+        month_start = (now.replace(day=1) - timedelta(days=150)).replace(day=1)
+        trend = _bucket_sales(completed, start=month_start, end=end, mode="month")[-6:]
+        volume_label = "Daily sales volume"
+    elif period in {"this-month", "last-month"}:
+        assert start is not None
+        series_end = end - timedelta(microseconds=1) if period == "last-month" else end
+        series = _bucket_sales(completed, start=start, end=series_end, mode="day")
+        month_start = (now.replace(day=1) - timedelta(days=150)).replace(day=1)
+        trend = _bucket_sales(completed, start=month_start, end=end, mode="month")[-6:]
+        volume_label = "Daily sales volume"
+    elif period == "this-year":
+        assert start is not None
+        series = _bucket_sales(completed, start=start, end=end, mode="month")
+        trend = series
+        volume_label = "Monthly sales volume"
+    else:  # all-time
+        oldest = min((_as_utc(s.created_at) for s in completed), default=now)
+        series_start = oldest.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        series = _bucket_sales(completed, start=series_start, end=end, mode="month")
+        trend = series[-12:] if len(series) > 12 else series
+        volume_label = "Monthly sales volume"
 
     return {
-        "todayCount": len(today_sales),
-        "todayRevenue": today_revenue,
+        "period": period,
+        "periodLabel": PERIOD_OPTIONS[period],
+        "volumeLabel": volume_label,
+        "todayCount": len(period_sales),
+        "todayRevenue": period_revenue,
         "cashRevenue": cash_revenue,
         "momoRevenue": momo_revenue,
         "voidedCount": len(voided),
         "completedCount": len(completed),
-        "weekly": chronological,
-        "monthly": monthly,
+        "weekly": series,
+        "monthly": trend,
+        "series": series,
+        "trend": trend,
     }
 
 
