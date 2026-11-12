@@ -179,8 +179,8 @@ def change_pin(
     if not verify_password(body.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     pin = body.new_pin.strip()
-    if len(pin) < 4:
-        raise HTTPException(status_code=400, detail="PIN must be at least 4 characters")
+    if not pin.isdigit() or len(pin) != 4:
+        raise HTTPException(status_code=400, detail="PIN must be exactly 4 digits")
     user.pin_hash = hash_password(pin)
     add_audit(
         db,
