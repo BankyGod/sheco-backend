@@ -115,6 +115,24 @@ class ProductSaveIn(CamelModel):
     active: bool = True
 
 
+class ProductBulkIn(CamelModel):
+    products: list[ProductSaveIn]
+
+
+class ProductBulkRowResult(CamelModel):
+    row: int
+    name: str | None = None
+    ok: bool
+    error: str | None = None
+    product: dict | None = None
+
+
+class ProductBulkOut(CamelModel):
+    created: int
+    failed: int
+    results: list[ProductBulkRowResult]
+
+
 class RestockIn(CamelModel):
     product_id: str = Field(alias="productId")
     batch_number: str = Field(alias="batchNumber")
